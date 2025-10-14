@@ -15,13 +15,18 @@ repository = { type = "github", user = "karlsson", repo = "avmgls" }
 # https://gleam.run/writing-gleam/gleam-toml/.
 
 # gleam 1.9 supports github repositories
-gleam = ">= 1.9.1"
+gleam = ">= 1.10.1"
 
 [dependencies]
 gleam_stdlib = ">= 0.44.0 and < 2.0.0"
-gleam_erlang = ">= 0.34.0 and < 1.0.0"
+gleam_erlang = ">= 1.0.0 and < 2.0.0"
+glydamic = { git = "https://github.com/karlsson/glydamic", ref="main"}
 
 [dev-dependencies]
 gleeunit = ">= 1.0.0 and < 2.0.0"
 atomvm_packgleam = { git = "https://github.com/karlsson/atomvm_packgleam", ref="main"}
-## atomvm_packgleam = { path = "../atomvm_packgleam"}
+
+## eensy_dev_tools = { path = "../eensy_dev_tools"}
+
+## [eensy]
+## platform = "esp32"

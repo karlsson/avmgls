@@ -1,16 +1,17 @@
 import avmgls/ls.{type Colour, type LedSubject, type StartArgs}
 import gleam/dict.{type Dict}
-import gleam/erlang/process
+import gleam/erlang/process.{type Pid}
 import gleam/int
 import gleam/list
+import glydamic
 
 type LedDict =
-  Dict(process.Pid, Colour)
+  Dict(Pid, Colour)
 
 type State {
   State(
     led_array: List(LedDict),
-    spi: process.Pid,
+    spi: Pid,
     strip_len: Int,
     index: Int,
     device_name: ls.StripType,
@@ -29,7 +30,7 @@ pub fn init(sa: StartArgs) -> Result(LedSubject, Nil) {
       device_name: strip_type,
     )
   let start_subject = process.new_subject()
-  process.start(fn() { loop_init(start_subject, state) }, True)
+  glydamic.splink(fn() { loop_init(start_subject, state) })
   process.receive(start_subject, 200)
 }
 
@@ -118,13 +119,10 @@ fn sum_rgb(led_dict: LedDict) {
 }
 
 @external(erlang, "avmgls_ffi", "spi_init_ws2812")
-fn spi_init_ws2812(di_pin: Int) -> process.Pid
+fn spi_init_ws2812(di_pin: Int) -> Pid
 
 @external(erlang, "avmgls_ffi", "write_to_spi_ws2812")
-fn write_to_spi_ws2812(
-  write_data: BitArray,
-  spi: process.Pid,
-) -> Result(Nil, Nil)
+fn write_to_spi_ws2812(write_data: BitArray, spi: Pid) -> Result(Nil, Nil)
 
 fn build_stream(lc: List(Colour)) -> BitArray {
   let f1 = fn(acc: BitArray, c: Colour) {

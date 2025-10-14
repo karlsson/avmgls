@@ -1,12 +1,11 @@
 //// `avmgls` - Atom VM LED Strip walk implemented in Gleam
 //// Walking leds with random colour and speed. Tested with ESP32-C3 SoC.
 
-import avmgls/ls.{
-  type Colour, type LedSubject, type StartArgs, StartArgs, Ws2812,
-}
+import avmgls/ls.{type Colour, type LedSubject, StartArgs, Ws2812}
 import avmgls/ls_server
 import gleam/erlang/process
 import gleam/io
+import glydamic
 
 // Gleam run start
 pub fn main() {
@@ -45,12 +44,9 @@ fn loop(led_subject, strip_len: Int, n: Int) -> Nil {
         )
         _ -> #(1000, 0, 10, 0)
       }
-      process.start(
-        fn() {
-          walking_led_up(led_subject, strip_len, 0, duration, ls.RGB(r, g, b))
-        },
-        False,
-      )
+      glydamic.splunk(fn() {
+        walking_led_up(led_subject, strip_len, 0, duration, ls.RGB(r, g, b))
+      })
       process.sleep(3000)
       loop(led_subject, strip_len, n - 1)
     }
@@ -64,20 +60,20 @@ fn light_led(led_subject: LedSubject, index: Int, duration: Int, colour: Colour)
   ls.clear_led(led_subject, index)
 }
 
-fn walking_led(
-  led_subject: LedSubject,
-  index: Int,
-  duration: Int,
-  colour: Colour,
-) {
-  case index {
-    n if n > 0 -> {
-      light_led(led_subject, index, duration, colour)
-      walking_led(led_subject, n - 1, duration, colour)
-    }
-    _ -> Nil
-  }
-}
+// fn walking_led(
+//   led_subject: LedSubject,
+//   index: Int,
+//   duration: Int,
+//   colour: Colour,
+// ) -> Nil {
+//   case index {
+//     n if n > 0 -> {
+//       light_led(led_subject, index, duration, colour)
+//       walking_led(led_subject, n - 1, duration, colour)
+//     }
+//     _ -> Nil
+//   }
+// }
 
 fn walking_led_up(
   led_subject: LedSubject,
