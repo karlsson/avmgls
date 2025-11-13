@@ -16,18 +16,21 @@ pub type Colour {
 }
 
 pub type LedCommand {
-  ClearLed(from: process.Pid, index: Int)
-  SetLed(from: process.Pid, index: Int, col: Colour)
-  UpdateLedStrip
+  PrepareSetLed(index: Int, col: Colour)
+  PrepareLedStrip(row: Int)
+  LightLeds(row: Int)
+  Rotate(upto: Int)
+  Duration(ms: Int)
+  RunCommands(List(LedCommand))
 }
 
 pub type LedSubject =
   Subject(LedCommand)
 
 pub fn clear_led(ledsub: LedSubject, index: Int) -> Nil {
-  process.send(ledsub, ClearLed(process.self(), index))
+  set_led(ledsub, index, RGB(0, 0, 0))
 }
 
 pub fn set_led(ledsub: LedSubject, index: Int, col: Colour) -> Nil {
-  process.send(ledsub, SetLed(process.self(), index, col))
+  process.send(ledsub, PrepareSetLed(index, col))
 }

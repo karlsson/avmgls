@@ -1,70 +1,89 @@
+import avmgls/avm_ets
 import avmgls/ls.{type Colour, type LedSubject, type StartArgs}
-import gleam/dict.{type Dict}
+import gleam/bit_array
 import gleam/erlang/process.{type Pid}
 import gleam/int
 import gleam/list
-import glydamic
-
-type LedDict =
-  Dict(Pid, Colour)
+import gleam/otp/actor
 
 type State {
   State(
-    led_array: List(LedDict),
+    led_array: List(Colour),
     spi: Pid,
     strip_len: Int,
-    index: Int,
     device_name: ls.StripType,
+    table: avm_ets.Table(BitArray),
+    my_subject: ls.LedSubject,
   )
 }
 
-pub fn init(sa: StartArgs) -> Result(LedSubject, Nil) {
-  let ls.StartArgs(di_pin:, ci_pin: _ci_pin, strip_type:, strip_len:) = sa
-  let spi = spi_init_ws2812(di_pin)
-  let state =
-    State(
-      led_array: init_led_dict(strip_len),
-      spi: spi,
-      strip_len: strip_len,
-      index: 0,
-      device_name: strip_type,
-    )
-  let start_subject = process.new_subject()
-  glydamic.splink(fn() { loop_init(start_subject, state) })
-  process.receive(start_subject, 200)
+pub fn init(sa: StartArgs, ls_name: process.Name(ls.LedCommand)) {
+  actor.new_with_initialiser(1000, fn(_) {
+    let ls.StartArgs(di_pin:, ci_pin: _ci_pin, strip_type:, strip_len:) = sa
+    let spi = spi_init_ws2812(di_pin)
+    let led_subject: LedSubject = process.named_subject(ls_name)
+
+    let state =
+      State(
+        led_array: init_leds(strip_len),
+        spi: spi,
+        strip_len: strip_len,
+        device_name: strip_type,
+        table: avm_ets.new_default("ledmatrix"),
+        my_subject: led_subject,
+      )
+    Ok(actor.initialised(state))
+  })
+  |> actor.named(ls_name)
+  |> actor.on_message(handle_message)
+  |> actor.start()
 }
 
-fn loop_init(start_subject, state: State) {
-  let led_subject: LedSubject = process.new_subject()
-  process.send(start_subject, led_subject)
-  process.send_after(led_subject, 1000, ls.UpdateLedStrip)
-  loop(led_subject, state)
-}
-
-fn loop(led_subject: LedSubject, state: State) {
-  let #(new_array, new_index) = case process.receive_forever(led_subject) {
-    ls.ClearLed(sub, index) -> {
-      let dict = ia_get(state.led_array, index)
-      let new_dict = dict.delete(dict, sub)
-      let na = ia_set(state.led_array, index, new_dict)
-      #(na, index)
+fn handle_message(state: State, message: ls.LedCommand) {
+  let new_array = case message {
+    ls.PrepareSetLed(index, colour) -> {
+      ia_set(state.led_array, index, colour)
     }
-    ls.SetLed(sub, index, colour) -> {
-      let dict = ia_get(state.led_array, index)
-      {
-        let new_dict = dict.insert(dict, sub, colour)
-        let na = ia_set(state.led_array, index, new_dict)
-        #(na, index)
+    ls.PrepareLedStrip(row) -> {
+      let _ = update_led_strip(state, row)
+      init_leds(state.strip_len)
+    }
+    ls.LightLeds(row) -> {
+      case avm_ets.lookup(state.table, row) {
+        Ok(stream) -> {
+          let _ = write_to_spi_ws2812(stream, state.spi)
+          avm_ets.insert(state.table, 0, stream)
+          Nil
+        }
+        Error(Nil) -> Nil
       }
+      state.led_array
     }
-    ls.UpdateLedStrip -> {
-      let na_index = update_led_strip(state)
-      process.send_after(led_subject, 100, ls.UpdateLedStrip)
-      na_index
+    ls.Duration(ms) -> {
+      process.sleep(ms)
+      state.led_array
+    }
+    ls.Rotate(upto) -> {
+      let assert Ok(stream) = avm_ets.lookup(state.table, 0)
+      let stream = rotate_upto(stream, upto)
+      let _ = write_to_spi_ws2812(stream, state.spi)
+      avm_ets.insert(state.table, 0, stream)
+      state.led_array
+    }
+    ls.RunCommands(commands) -> {
+      // The gleam/otp/factory_supervisor uses the simple_on_for_one
+      // supervisor strategy which is not implemented in AtomVM (yet).
+      // Just spawn-link, it won't crash anyway since we have type checking.
+      process.spawn(fn() { run_commands(state.my_subject, commands) })
+      state.led_array
     }
   }
-  let new_index = int.max(state.index, new_index)
-  loop(led_subject, State(..state, led_array: new_array, index: new_index))
+  actor.continue(State(..state, led_array: new_array))
+}
+
+// ---
+fn run_commands(led_subject, commands) {
+  list.each(commands, fn(command) { process.send(led_subject, command) })
 }
 
 // -----------------------------------------------------------
@@ -77,45 +96,15 @@ fn ia_set(list: List(a), index: Int, item: a) -> List(a) {
   })
 }
 
-fn ia_get(list: List(LedDict), index: Int) -> LedDict {
-  let assert Ok(item) = list.first(list.drop(list, index))
-  item
-}
-
-fn init_led_dict(strip_len: Int) -> List(LedDict) {
-  list.range(1, strip_len) |> list.map(fn(_) { dict.from_list([]) })
+fn init_leds(strip_len: Int) -> List(Colour) {
+  list.range(1, strip_len) |> list.map(fn(_) { ls.RGB(0, 0, 0) })
 }
 
 // -------------------------------------------------
 
-fn update_led_strip(state: State) -> #(List(LedDict), Int) {
-  let State(led_array:, spi:, strip_len: _, index:, device_name: _) = state
-  case index >= 0 {
-    False -> #(led_array, index)
-    True -> {
-      let spi_led_array =
-        list.reverse(
-          list.index_fold(led_array, [], fn(acc, item, i) {
-            case i < index {
-              True -> [item, ..acc]
-              False -> acc
-            }
-          }),
-        )
-      let spi_color_list =
-        list.map(spi_led_array, fn(led_dict) { sum_rgb(led_dict) })
-      let _ = write_to_spi_ws2812(build_stream(spi_color_list), spi)
-      #(led_array, -1)
-    }
-  }
-}
-
-fn sum_rgb(led_dict: LedDict) {
-  dict.fold(led_dict, ls.RGB(0, 0, 0), fn(acc, _key, rgb) {
-    let ls.RGB(r1, g1, b1) = acc
-    let ls.RGB(r2, g2, b2) = rgb
-    ls.RGB(int.min(r1 + r2, 255), int.min(g1 + g2, 255), int.min(b1 + b2, 255))
-  })
+fn update_led_strip(state: State, row: Int) -> avm_ets.Table(BitArray) {
+  let stream = build_stream(state.led_array)
+  avm_ets.insert(state.table, row, stream)
 }
 
 @external(erlang, "avmgls_ffi", "spi_init_ws2812")
@@ -169,6 +158,37 @@ fn led_strip_bits2(b: Int, n: Int, acc: Int) -> Int {
         n - 1,
         int.bitwise_shift_left(acc, 3) |> int.bitwise_or(spi_bits),
       )
+    }
+  }
+}
+
+/// Rotate bytes upto n.
+/// Every index is 9 bytes in size.
+pub fn rotate_upto(bytes: BitArray, n: Int) -> BitArray {
+  // 9 bytes * 8 bits
+  let length = bit_array.byte_size(bytes)
+  let n = n * 9
+  let n1 = int.min(n, length)
+  let #(keep, to_rotate) = case bytes {
+    <<to_rotate:size(n1)-bytes, fix:bytes>> -> #(fix, to_rotate)
+    _ -> #(bytes, <<>>)
+  }
+  <<rotate(to_rotate):bits, keep:bits>>
+}
+
+/// Rotate one RGB LED <=> 9 bytes
+fn rotate(bytes: BitArray) -> BitArray {
+  let start = bit_array.byte_size(bytes) - 9
+  case start <= 0 {
+    True -> bytes
+    False -> {
+      case bytes {
+        <<head:size(start)-bytes, last9:bytes>> -> <<
+          last9:bits,
+          head:bits,
+        >>
+        _ -> bytes
+      }
     }
   }
 }
