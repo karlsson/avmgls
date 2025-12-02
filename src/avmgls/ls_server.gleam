@@ -1,6 +1,7 @@
-import avmgls/avm_ets
+// import avmgls/avm_ets
 import avmgls/ls.{type Colour, type LedSubject, type StartArgs}
 import gleam/bit_array
+import gleam/dict
 import gleam/erlang/process.{type Pid}
 import gleam/int
 import gleam/list
@@ -8,16 +9,17 @@ import gleam/otp/actor
 
 type State {
   State(
-    led_array: List(Colour),
     spi: Pid,
     strip_len: Int,
     device_name: ls.StripType,
-    table: avm_ets.Table(BitArray),
+    table: dict.Dict(Int, BitArray),
     my_subject: ls.LedSubject,
   )
 }
 
-pub fn init(sa: StartArgs, ls_name: process.Name(ls.LedCommand)) {
+pub fn init(sa: StartArgs, ls_name: process.Name(List(ls.LedCommand))) {
+  // You need a custom initialiser since the table should be created
+  // by the owning, i.e. the spawned process.
   actor.new_with_initialiser(1000, fn(_) {
     let ls.StartArgs(di_pin:, ci_pin: _ci_pin, strip_type:, strip_len:) = sa
     let spi = spi_init_ws2812(di_pin)
@@ -25,11 +27,10 @@ pub fn init(sa: StartArgs, ls_name: process.Name(ls.LedCommand)) {
 
     let state =
       State(
-        led_array: init_leds(strip_len),
         spi: spi,
         strip_len: strip_len,
         device_name: strip_type,
-        table: avm_ets.new_default("ledmatrix"),
+        table: dict.new(),
         my_subject: led_subject,
       )
     Ok(actor.initialised(state))
@@ -39,73 +40,66 @@ pub fn init(sa: StartArgs, ls_name: process.Name(ls.LedCommand)) {
   |> actor.start()
 }
 
-fn handle_message(state: State, message: ls.LedCommand) {
-  let new_array = case message {
-    ls.PrepareSetLed(index, colour) -> {
-      ia_set(state.led_array, index, colour)
-    }
-    ls.PrepareLedStrip(row) -> {
-      let _ = update_led_strip(state, row)
-      init_leds(state.strip_len)
-    }
-    ls.LightLeds(row) -> {
-      case avm_ets.lookup(state.table, row) {
-        Ok(stream) -> {
-          let _ = write_to_spi_ws2812(stream, state.spi)
-          avm_ets.insert(state.table, 0, stream)
-          Nil
-        }
-        Error(Nil) -> Nil
-      }
-      state.led_array
-    }
-    ls.Duration(ms) -> {
-      process.sleep(ms)
-      state.led_array
-    }
-    ls.Rotate(upto) -> {
-      let assert Ok(stream) = avm_ets.lookup(state.table, 0)
-      let stream = rotate_upto(stream, upto)
-      let _ = write_to_spi_ws2812(stream, state.spi)
-      avm_ets.insert(state.table, 0, stream)
-      state.led_array
-    }
-    ls.RunCommands(commands) -> {
-      // The gleam/otp/factory_supervisor uses the simple_on_for_one
-      // supervisor strategy which is not implemented in AtomVM (yet).
-      // Just spawn-link, it won't crash anyway since we have type checking.
-      process.spawn(fn() { run_commands(state.my_subject, commands) })
-      state.led_array
-    }
-  }
-  actor.continue(State(..state, led_array: new_array))
+fn handle_message(state: State, message: List(ls.LedCommand)) {
+  let new_state =
+    list.fold(message, state, fn(state, command) { run_command(state, command) })
+  actor.continue(new_state)
 }
 
 // ---
-fn run_commands(led_subject, commands) {
-  list.each(commands, fn(command) { process.send(led_subject, command) })
-}
-
-// -----------------------------------------------------------
-fn ia_set(list: List(a), index: Int, item: a) -> List(a) {
-  list.index_map(list, fn(x, i) {
-    case i == index {
-      False -> x
-      True -> item
+pub fn set_leds(
+  strip_len: Int,
+  led_settings: List(ls.LedSetting),
+) -> List(Colour) {
+  list.range(0, { strip_len - 1 })
+  |> list.map(fn(i) {
+    case list.key_find(led_settings, i) {
+      Error(Nil) -> ls.RGB(0, 0, 0)
+      Ok(item) -> item
     }
   })
 }
 
-fn init_leds(strip_len: Int) -> List(Colour) {
-  list.range(1, strip_len) |> list.map(fn(_) { ls.RGB(0, 0, 0) })
+fn run_command(state: State, command) -> State {
+  case command {
+    ls.PrepareLedStrip(led_array, row) -> {
+      let new_table =
+        set_leds(state.strip_len, led_array)
+        |> build_stream()
+        |> dict.insert(state.table, row, _)
+      State(..state, table: new_table)
+    }
+    ls.LightLeds(row) -> {
+      case dict.get(state.table, row) {
+        Ok(stream) -> {
+          echo row
+          let _ = write_to_spi_ws2812(stream, state.spi)
+          // Row 0 is special as the current working row.
+          let new_table = dict.insert(state.table, 0, stream)
+          State(..state, table: new_table)
+        }
+        Error(Nil) -> state
+      }
+    }
+    ls.Duration(ms) -> {
+      process.sleep(ms)
+      state
+    }
+    ls.Rotate(upto, direction) -> {
+      case dict.get(state.table, 0) {
+        Ok(stream) -> {
+          let new_stream = rotate_upto(stream, upto, direction)
+          let _ = write_to_spi_ws2812(new_stream, state.spi)
+          let new_table = dict.insert(state.table, 0, new_stream)
+          State(..state, table: new_table)
+        }
+        Error(Nil) -> echo state
+      }
+    }
+  }
 }
 
 // -------------------------------------------------
-
-fn update_led_strip(state: State, row: Int) -> avm_ets.Table(BitArray) {
-  let stream = build_stream(state.led_array)
-  avm_ets.insert(state.table, row, stream)
-}
 
 @external(erlang, "avmgls_ffi", "spi_init_ws2812")
 fn spi_init_ws2812(di_pin: Int) -> Pid
@@ -164,7 +158,7 @@ fn led_strip_bits2(b: Int, n: Int, acc: Int) -> Int {
 
 /// Rotate bytes upto n.
 /// Every index is 9 bytes in size.
-pub fn rotate_upto(bytes: BitArray, n: Int) -> BitArray {
+pub fn rotate_upto(bytes: BitArray, n: Int, direction: ls.Direction) -> BitArray {
   // 9 bytes * 8 bits
   let length = bit_array.byte_size(bytes)
   let n = n * 9
@@ -173,21 +167,25 @@ pub fn rotate_upto(bytes: BitArray, n: Int) -> BitArray {
     <<to_rotate:size(n1)-bytes, fix:bytes>> -> #(fix, to_rotate)
     _ -> #(bytes, <<>>)
   }
-  <<rotate(to_rotate):bits, keep:bits>>
+  <<rotate(to_rotate, direction):bits, keep:bits>>
 }
 
 /// Rotate one RGB LED <=> 9 bytes
-fn rotate(bytes: BitArray) -> BitArray {
+fn rotate(bytes: BitArray, direction: ls.Direction) -> BitArray {
   let start = bit_array.byte_size(bytes) - 9
-  case start <= 0 {
-    True -> bytes
-    False -> {
-      case bytes {
-        <<head:size(start)-bytes, last9:bytes>> -> <<
+  case start {
+    start if start <= 0 -> bytes
+    start -> {
+      case bytes, direction {
+        <<head:size(start)-bytes, last9:bytes>>, ls.Up -> <<
           last9:bits,
           head:bits,
         >>
-        _ -> bytes
+        <<first9:size(9)-bytes, last:bytes>>, ls.Down -> <<
+          last:bits,
+          first9:bits,
+        >>
+        _, _ -> bytes
       }
     }
   }

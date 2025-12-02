@@ -1,6 +1,8 @@
 import gleam/erlang/process.{type Subject}
+import gleam/int
+import gleam/list
 
-// Currently only Ws2812 implemented
+/// Currently only Ws2812 implemented.
 pub type StripType {
   Ws2812
   Sk9822
@@ -15,22 +17,42 @@ pub type Colour {
   RGB(red: Int, green: Int, blue: Int)
 }
 
+/// Index start at 0 to strip length-1
+pub type LedSetting =
+  #(Int, Colour)
+
+pub type Direction {
+  Up
+  Down
+}
+
 pub type LedCommand {
-  PrepareSetLed(index: Int, col: Colour)
-  PrepareLedStrip(row: Int)
+  /// Prepare a list of different colours in indexed LEDs.
+  /// Once prepared, store in a row.
+  /// You can set rows 1 to ..
+  PrepareLedStrip(led_settings: List(LedSetting), row: Int)
+  /// Pull in a row and store in the working (row 0) area.
+  /// Light the LED strip.
   LightLeds(row: Int)
-  Rotate(upto: Int)
+  /// Rotate the LEDs in the working row upto index.
+  Rotate(upto: Int, direction: Direction)
+  /// Wait ms milliseconds until next command.
   Duration(ms: Int)
-  RunCommands(List(LedCommand))
 }
 
 pub type LedSubject =
-  Subject(LedCommand)
+  Subject(List(LedCommand))
 
-pub fn clear_led(ledsub: LedSubject, index: Int) -> Nil {
-  set_led(ledsub, index, RGB(0, 0, 0))
+pub fn increase(colour: Colour) -> Colour {
+  colmap(colour, fn(rgb: Int) { int.min(255, rgb * 2) })
 }
 
-pub fn set_led(ledsub: LedSubject, index: Int, col: Colour) -> Nil {
-  process.send(ledsub, PrepareSetLed(index, col))
+pub fn decrease(colour: Colour) -> Colour {
+  colmap(colour, fn(rgb) { rgb / 2 })
+}
+
+fn colmap(colour: Colour, f: fn(Int) -> Int) -> Colour {
+  let RGB(r, g, b) = colour
+  let assert [r, g, b] = list.map([r, g, b], f)
+  RGB(r, g, b)
 }

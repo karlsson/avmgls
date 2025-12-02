@@ -21,6 +21,7 @@ pub fn main() {
 ///  Calls a loop that spawns one process for each led to walk the strip.
 ///  Lasts for 60 seconds.
 pub fn start() {
+  // Maybe one should spawn a watchdog feeding process instead.
   stop_watchdog()
   io.println("Hello from avmgls!")
   let testfile1 = read_priv("subdir/test2.txt")
@@ -29,7 +30,9 @@ pub fn start() {
   let led_subject: LedSubject = process.named_subject(ls_name)
 
   let strip_len = 60
-  // DI Pin 8 for ESP32-C3
+  // On-board RGB LED:
+  // DI Pin 8 for ESP32-C3-DevKit{C-02, M-1}
+  // DI Pin 10 for ESP32-C3-Zero: https://www.waveshare.com/wiki/ESP32-C3-Zero
   let start_args =
     StartArgs(di_pin: 8, ci_pin: -1, strip_type: Ws2812, strip_len: strip_len)
 
@@ -42,109 +45,53 @@ pub fn start() {
     |> supervisor.add(child_spec)
     |> supervisor.start()
 
-  prepare_leds(led_subject)
-  run_commands(led_subject)
-  run_commands(led_subject)
-  // prepare_leds(led_subject)
-  run_commands(led_subject)
-  run_commands(led_subject)
-  // loop(led_subject, strip_len, 20)
-  process.sleep(60_000)
-  process.send(led_subject, ls.PrepareLedStrip(1))
-  process.send(led_subject, ls.LightLeds(1))
+  let cs = [
+    // first row will clear all leds
+    ls.PrepareLedStrip([], 1),
+    ..[
+      list.range(0, 11)
+        |> list.map(fn(i) { #(i * 5, pink) })
+        |> ls.PrepareLedStrip(2),
+      ls.LightLeds(2),
+      ls.Duration(200),
+    ]
+  ]
+  process.send(led_subject, cs)
+  //  process.send(led_subject, [ls.LightLeds(2), ls.Duration(200)])
+
+  rotations(led_subject, 0, 45, ls.Up)
+  rotations(led_subject, 0, 45, ls.Down)
+  process.sleep(100_000)
+  // clear all leds
+  process.send(led_subject, [ls.LightLeds(1)])
   process.sleep(1000)
 }
 
-fn prepare_leds(led_subject) {
-  ls.set_led(led_subject, 1, ls.RGB(10, 10, 10))
-  ls.set_led(led_subject, 10, ls.RGB(0, 20, 20))
-  ls.set_led(led_subject, 20, ls.RGB(10, 5, 5))
-  ls.set_led(led_subject, 31, ls.RGB(20, 0, 50))
-  process.send(led_subject, ls.PrepareLedStrip(1))
-  process.send(led_subject, ls.LightLeds(1))
+const pink = ls.RGB(0x20, 0x00, 0x20)
+
+fn rotations(led_subject, n, max, direction) {
+  case n < max {
+    True -> {
+      process.send(led_subject, rotate(direction))
+      rotations(led_subject, n + 1, max, direction)
+    }
+    False -> Nil
+  }
 }
 
-fn run_commands(led_subject) {
-  let l1 = [ls.Rotate(30), ls.Duration(100)]
-  process.send(
-    led_subject,
-    ls.RunCommands(list.repeat(
-      ls.RunCommands(l1 |> list.append(l1) |> list.append(l1)),
-      10,
-    )),
-  )
+fn rotate(direction) {
+  let l1 = [ls.Rotate(50, direction), ls.Duration(100)]
+  l1 |> list.append(l1) |> list.append(l1) |> list.append(l1)
 }
-
-// fn loop(led_subject, strip_len: Int, n: Int) -> Nil {
-//   case n {
-//     0 -> Nil
-//     n -> {
-//       let rand = random()
-//       let randbits = <<rand:size(32)>>
-//       let #(duration, r, g, b) = case randbits {
-//         <<duration:int, r:int, g:int, b:int>> -> #(
-//           duration + 200,
-//           r / 4,
-//           g / 4,
-//           b / 4,
-//         )
-//         _ -> #(1000, 0, 10, 0)
-//       }
-//       glydamic.splunk(fn() {
-//         walking_led_up(led_subject, strip_len, 0, duration, ls.RGB(r, g, b))
-//       })
-//       process.sleep(3000)
-//       loop(led_subject, strip_len, n - 1)
-//     }
-//   }
-// }
-
-// // ---------------------------------------------
-// fn light_led(led_subject: LedSubject, index: Int, duration: Int, colour: Colour) {
-//   ls.set_led(led_subject, index, colour)
-//   process.sleep(duration)
-//   ls.clear_led(led_subject, index)
-// }
-
-// fn walking_led(
-//   led_subject: LedSubject,
-//   index: Int,
-//   duration: Int,
-//   colour: Colour,
-// ) -> Nil {
-//   case index {
-//     n if n > 0 -> {
-//       light_led(led_subject, index, duration, colour)
-//       walking_led(led_subject, n - 1, duration, colour)
-//     }
-//     _ -> Nil
-//   }
-// }
-
-// fn walking_led_up(
-//   led_subject: LedSubject,
-//   max: Int,
-//   index: Int,
-//   duration: Int,
-//   colour: Colour,
-// ) {
-//   case index {
-//     n if n < max && n >= 0 -> {
-//       light_led(led_subject, index, duration, colour)
-//       walking_led_up(led_subject, max, n + 1, duration, colour)
-//     }
-//     _ -> Nil
-//   }
-// }
-
-/// atomvm:random() returns a 32 bit integer.
-// @external(erlang, "atomvm", "random")
-// fn random() -> Int
 
 @external(erlang, "avmgls_ffi", "read_priv")
 fn read_priv(path: String) -> String
 
 type WatchDogReturn
 
+// todo - spawn_link a watchdog feeding process
 @external(erlang, "esp", "task_wdt_deinit")
 fn stop_watchdog() -> WatchDogReturn
+// atomvm:random() returns a 32 bit integer.
+// @external(erlang, "atomvm", "random")
+// fn random() -> Int
