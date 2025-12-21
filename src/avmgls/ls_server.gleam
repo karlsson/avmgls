@@ -1,5 +1,4 @@
-// import avmgls/avm_ets
-import avmgls/ls.{type Colour, type LedSubject, type StartArgs}
+import avmgls/ls.{type Colour, type StartArgs}
 import gleam/bit_array
 import gleam/dict
 import gleam/erlang/process.{type Pid}
@@ -7,31 +6,35 @@ import gleam/int
 import gleam/list
 import gleam/otp/actor
 
+// import avmgls/avm_ets
+
+type PartArea {
+  PartArea(working_ls: BitArray, table: dict.Dict(Int, BitArray))
+}
+
+type Parts {
+  Parts(upper: PartArea, lower: PartArea)
+}
+
 type State {
-  State(
-    spi: Pid,
-    strip_len: Int,
-    device_name: ls.StripType,
-    table: dict.Dict(Int, BitArray),
-    my_subject: ls.LedSubject,
-  )
+  State(spi: Pid, device_name: ls.StripType, parts: Parts)
 }
 
 pub fn init(sa: StartArgs, ls_name: process.Name(List(ls.LedCommand))) {
-  // You need a custom initialiser since the table should be created
-  // by the owning, i.e. the spawned process.
+  // If ETS table you need a custom initialiser since the table should be
+  // created by the owning, i.e. the spawned process.
   actor.new_with_initialiser(1000, fn(_) {
-    let ls.StartArgs(di_pin:, ci_pin: _ci_pin, strip_type:, strip_len:) = sa
+    let ls.StartArgs(di_pin:, ci_pin: _ci_pin, strip_type:) = sa
     let spi = spi_init_ws2812(di_pin)
-    let led_subject: LedSubject = process.named_subject(ls_name)
 
     let state =
       State(
         spi: spi,
-        strip_len: strip_len,
         device_name: strip_type,
-        table: dict.new(),
-        my_subject: led_subject,
+        parts: Parts(
+          upper: PartArea(<<>>, dict.new()),
+          lower: PartArea(<<>>, dict.new()),
+        ),
       )
     Ok(actor.initialised(state))
   })
@@ -46,7 +49,96 @@ fn handle_message(state: State, message: List(ls.LedCommand)) {
   actor.continue(new_state)
 }
 
-// ---
+fn run_command(state: State, command) -> State {
+  case command {
+    ls.PrepareLedStrip(led_array, part, length, row) -> {
+      let stream =
+        set_leds(length, led_array)
+        |> build_stream()
+
+      let pa = case part {
+        ls.Upper -> state.parts.upper
+        ls.Lower -> state.parts.lower
+      }
+
+      let new_table = dict.insert(pa.table, row, stream)
+
+      State(..state, parts: case part {
+        ls.Upper ->
+          Parts(..state.parts, upper: PartArea(..pa, table: new_table))
+        ls.Lower ->
+          Parts(..state.parts, lower: PartArea(..pa, table: new_table))
+      })
+    }
+    ls.LightLeds(part, row) -> {
+      case part {
+        ls.Upper -> {
+          let pa = state.parts.upper
+          case dict.get(pa.table, row) {
+            Ok(stream) -> {
+              let _ =
+                write_to_spi_ws2812(
+                  <<state.parts.lower.working_ls:bits, stream:bits>>,
+                  state.spi,
+                )
+              State(
+                ..state,
+                parts: Parts(
+                  ..state.parts,
+                  upper: PartArea(..pa, working_ls: stream),
+                ),
+              )
+            }
+            Error(Nil) -> state
+          }
+        }
+        ls.Lower -> {
+          let pa = state.parts.lower
+          case dict.get(pa.table, row) {
+            Ok(stream) -> {
+              let _ =
+                write_to_spi_ws2812(
+                  <<stream:bits, state.parts.upper.working_ls:bits>>,
+                  state.spi,
+                )
+              State(
+                ..state,
+                parts: Parts(
+                  ..state.parts,
+                  lower: PartArea(..pa, working_ls: stream),
+                ),
+              )
+            }
+            Error(Nil) -> state
+          }
+        }
+      }
+    }
+    ls.Duration(ms) -> {
+      process.sleep(ms)
+      state
+    }
+    ls.Rotate(direction) -> {
+      case state.parts.lower {
+        PartArea(<<>>, _) -> state
+        PartArea(stream, dict) -> {
+          let new_stream = rotate(stream, direction)
+          let _ =
+            write_to_spi_ws2812(
+              <<new_stream:bits, state.parts.upper.working_ls:bits>>,
+              state.spi,
+            )
+          State(
+            ..state,
+            parts: Parts(..state.parts, lower: PartArea(new_stream, dict)),
+          )
+        }
+      }
+    }
+  }
+}
+
+// -------------------------------------------------
 pub fn set_leds(
   strip_len: Int,
   led_settings: List(ls.LedSetting),
@@ -59,47 +151,6 @@ pub fn set_leds(
     }
   })
 }
-
-fn run_command(state: State, command) -> State {
-  case command {
-    ls.PrepareLedStrip(led_array, row) -> {
-      let new_table =
-        set_leds(state.strip_len, led_array)
-        |> build_stream()
-        |> dict.insert(state.table, row, _)
-      State(..state, table: new_table)
-    }
-    ls.LightLeds(row) -> {
-      case dict.get(state.table, row) {
-        Ok(stream) -> {
-          echo row
-          let _ = write_to_spi_ws2812(stream, state.spi)
-          // Row 0 is special as the current working row.
-          let new_table = dict.insert(state.table, 0, stream)
-          State(..state, table: new_table)
-        }
-        Error(Nil) -> state
-      }
-    }
-    ls.Duration(ms) -> {
-      process.sleep(ms)
-      state
-    }
-    ls.Rotate(upto, direction) -> {
-      case dict.get(state.table, 0) {
-        Ok(stream) -> {
-          let new_stream = rotate_upto(stream, upto, direction)
-          let _ = write_to_spi_ws2812(new_stream, state.spi)
-          let new_table = dict.insert(state.table, 0, new_stream)
-          State(..state, table: new_table)
-        }
-        Error(Nil) -> echo state
-      }
-    }
-  }
-}
-
-// -------------------------------------------------
 
 @external(erlang, "avmgls_ffi", "spi_init_ws2812")
 fn spi_init_ws2812(di_pin: Int) -> Pid
@@ -156,22 +207,8 @@ fn led_strip_bits2(b: Int, n: Int, acc: Int) -> Int {
   }
 }
 
-/// Rotate bytes upto n.
-/// Every index is 9 bytes in size.
-pub fn rotate_upto(bytes: BitArray, n: Int, direction: ls.Direction) -> BitArray {
-  // 9 bytes * 8 bits
-  let length = bit_array.byte_size(bytes)
-  let n = n * 9
-  let n1 = int.min(n, length)
-  let #(keep, to_rotate) = case bytes {
-    <<to_rotate:size(n1)-bytes, fix:bytes>> -> #(fix, to_rotate)
-    _ -> #(bytes, <<>>)
-  }
-  <<rotate(to_rotate, direction):bits, keep:bits>>
-}
-
 /// Rotate one RGB LED <=> 9 bytes
-fn rotate(bytes: BitArray, direction: ls.Direction) -> BitArray {
+pub fn rotate(bytes: BitArray, direction: ls.Direction) -> BitArray {
   let start = bit_array.byte_size(bytes) - 9
   case start {
     start if start <= 0 -> bytes

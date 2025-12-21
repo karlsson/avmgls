@@ -36,5 +36,5 @@ pub fn rotate_test() {
   let array2 = list.range(10, 18) |> list2bin
   let array3 = list.range(19, 27) |> list2bin
   let array4 = <<array2:bits, array1:bits, array3:bits>>
-  assert ls_server.rotate_upto(array, 2, ls.Up) == array4
+  assert ls_server.rotate(array, ls.Up) == array4
 }

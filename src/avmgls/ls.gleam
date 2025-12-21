@@ -10,7 +10,7 @@ pub type StripType {
 }
 
 pub type StartArgs {
-  StartArgs(di_pin: Int, ci_pin: Int, strip_type: StripType, strip_len: Int)
+  StartArgs(di_pin: Int, ci_pin: Int, strip_type: StripType)
 }
 
 pub type Colour {
@@ -26,16 +26,28 @@ pub type Direction {
   Down
 }
 
+pub type Part {
+  Upper
+  Lower
+}
+
 pub type LedCommand {
   /// Prepare a list of different colours in indexed LEDs.
   /// Once prepared, store in a row.
   /// You can set rows 1 to ..
-  PrepareLedStrip(led_settings: List(LedSetting), row: Int)
-  /// Pull in a row and store in the working (row 0) area.
+  PrepareLedStrip(
+    led_settings: List(LedSetting),
+    part: Part,
+    length: Int,
+    row: Int,
+  )
+  /// Pull in a row and store in the working area.
   /// Light the LED strip.
-  LightLeds(row: Int)
-  /// Rotate the LEDs in the working row upto index.
-  Rotate(upto: Int, direction: Direction)
+  LightLeds(part: Part, row: Int)
+  /// Rotate the LEDs in the low part of the working row.
+  Rotate(direction: Direction)
+  // SetUpperPart(length: Int, led_settings: List(LedSetting))
+  /// Set upper part of led strip
   /// Wait ms milliseconds until next command.
   Duration(ms: Int)
 }
