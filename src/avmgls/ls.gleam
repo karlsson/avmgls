@@ -52,8 +52,16 @@ pub type LedCommand {
   Duration(ms: Int)
 }
 
-pub type LedSubject =
-  Subject(List(LedCommand))
+// pub type LedSubject =
+//   Subject(List(LedCommand))
+
+pub type LedReply {
+  Done
+}
+
+pub type Message {
+  Message(reply_to: Subject(LedReply), led_commands: List(LedCommand))
+}
 
 pub fn increase(colour: Colour) -> Colour {
   colmap(colour, fn(rgb: Int) { int.min(255, rgb * 2) })

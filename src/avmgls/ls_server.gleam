@@ -1,4 +1,4 @@
-import avmgls/ls.{type Colour, type StartArgs}
+import avmgls/ls.{type Colour, type Message, type StartArgs}
 import gleam/bit_array
 import gleam/dict
 import gleam/erlang/process.{type Pid}
@@ -20,7 +20,7 @@ type State {
   State(spi: Pid, device_name: ls.StripType, parts: Parts)
 }
 
-pub fn init(sa: StartArgs, ls_name: process.Name(List(ls.LedCommand))) {
+pub fn init(sa: StartArgs, ls_name: process.Name(ls.Message)) {
   // If ETS table you need a custom initialiser since the table should be
   // created by the owning, i.e. the spawned process.
   actor.new_with_initialiser(1000, fn(_) {
@@ -43,9 +43,13 @@ pub fn init(sa: StartArgs, ls_name: process.Name(List(ls.LedCommand))) {
   |> actor.start()
 }
 
-fn handle_message(state: State, message: List(ls.LedCommand)) {
+fn handle_message(state: State, message: Message) {
+  let ls.Message(reply_to, commands) = message
   let new_state =
-    list.fold(message, state, fn(state, command) { run_command(state, command) })
+    list.fold(commands, state, fn(state, command) {
+      run_command(state, command)
+    })
+  process.send(reply_to, ls.Done)
   actor.continue(new_state)
 }
 

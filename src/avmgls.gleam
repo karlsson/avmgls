@@ -1,9 +1,9 @@
 //// `avmgls` - Atom VM LED Strip walk implemented in Gleam
 //// Walking leds with random colour and speed. Tested with ESP32-C3 SoC.
 
-import avmgls/ls.{type LedSubject, Lower, StartArgs, Upper, Ws2812}
+import avmgls/ls.{type Message, Lower, Message, StartArgs, Upper, Ws2812}
 import avmgls/ls_server
-import gleam/erlang/process
+import gleam/erlang/process.{type Subject}
 import gleam/int
 import gleam/io
 import gleam/list
@@ -24,7 +24,7 @@ const lightpink = ls.RGB(0x05, 0x00, 0x05)
 
 const green = ls.RGB(0x00, 0x40, 0x00)
 
-const red = ls.RGB(0x40, 0x00, 0x00)
+// const red = ls.RGB(0x40, 0x00, 0x00)
 
 // For AtomVM start
 /// Start the application, callback for AtomVM init.
@@ -37,7 +37,7 @@ pub fn start() {
   let testfile1 = read_priv("subdir/test2.txt")
   io.println(testfile1)
   let ls_name = process.new_name("led_strip_server")
-  let led_subject: LedSubject = process.named_subject(ls_name)
+  let led_subject: Subject(Message) = process.named_subject(ls_name)
 
   // On-board RGB LED:
   // DI Pin 8 for ESP32-C3-DevKit{C-02, M-1}
@@ -53,34 +53,30 @@ pub fn start() {
     |> supervisor.add(child_spec)
     |> supervisor.start()
 
-  process.send(led_subject, prepare_lower())
-  process.send(led_subject, prepare_upper())
-  process.send(
-    led_subject,
-    list.map([Upper, Lower], fn(part) { ls.LightLeds(part, 1) }),
-  )
+  process.call_forever(led_subject, Message(_, prepare_lower()))
+  process.call_forever(led_subject, Message(_, prepare_upper()))
+  process.call_forever(led_subject, Message(_, [ls.LightLeds(Lower, 1)]))
+  process.spawn(fn() { move_upper(led_subject, 1) })
   rotations(led_subject, 0, 45, ls.Up)
   rotations(led_subject, 0, 45, ls.Down)
-  process.sleep(40_000)
-  process.send(
-    led_subject,
-    list.map([Upper, Lower], fn(part) { ls.LightLeds(part, 2) }),
-  )
+  process.call_forever(led_subject, Message(_, [ls.LightLeds(Lower, 2)]))
   rotations(led_subject, 0, 45, ls.Down)
   rotations(led_subject, 0, 45, ls.Up)
-  process.sleep(40_000)
-  process.send(led_subject, [ls.LightLeds(Upper, 3), ls.LightLeds(Lower, 0)])
-  process.sleep(20_000)
+  process.call_forever(led_subject, Message(_, [ls.LightLeds(Lower, 0)]))
+  process.sleep(5000)
 
   // clear all leds
-  process.send(led_subject, [ls.LightLeds(Lower, 0), ls.LightLeds(Upper, 0)])
+  process.call_forever(
+    led_subject,
+    Message(_, [ls.LightLeds(Lower, 0), ls.LightLeds(Upper, 0)]),
+  )
   process.sleep(1000)
 }
 
 fn rotations(led_subject, n, max, direction) {
   case n < max {
     True -> {
-      process.send(led_subject, rotate(direction))
+      process.call_forever(led_subject, Message(_, rotate(direction)))
       rotations(led_subject, n + 1, max, direction)
     }
     False -> Nil
@@ -90,6 +86,17 @@ fn rotations(led_subject, n, max, direction) {
 fn rotate(direction) {
   let l1 = [ls.Rotate(direction), ls.Duration(100)]
   l1 |> list.append(l1) |> list.append(l1) |> list.append(l1)
+}
+
+fn move_upper(led_subject, n: Int) -> Nil {
+  case n < 6 {
+    True -> {
+      process.call_forever(led_subject, Message(_, [ls.LightLeds(Upper, n)]))
+      process.sleep(2000)
+      move_upper(led_subject, n + 1)
+    }
+    False -> move_upper(led_subject, 1)
+  }
 }
 
 fn prepare_lower() -> List(ls.LedCommand) {
@@ -117,29 +124,16 @@ fn prepare_lower() -> List(ls.LedCommand) {
 
 fn prepare_upper() -> List(ls.LedCommand) {
   let strip_len = 10
+  // Index 0 clears all leds
   let ls0 = ls.PrepareLedStrip([], Upper, strip_len, 0)
-  let ls1 =
-    ls.PrepareLedStrip(
-      [#(0, red), #(4, pink), #(9, green)],
-      Upper,
-      strip_len,
-      1,
-    )
-  let ls2 =
-    ls.PrepareLedStrip(
-      [#(0, green), #(4, red), #(9, pink)],
-      Upper,
-      strip_len,
-      2,
-    )
-  let ls3 =
-    ls.PrepareLedStrip(
-      [#(0, pink), #(4, green), #(9, red)],
-      Upper,
-      strip_len,
-      3,
-    )
-  [ls0, ls1, ls2, ls3]
+
+  // Pinky leds moving into center
+  let ls1 = ls.PrepareLedStrip([#(0, pink), #(9, pink)], Upper, strip_len, 1)
+  let ls2 = ls.PrepareLedStrip([#(1, pink), #(8, pink)], Upper, strip_len, 2)
+  let ls3 = ls.PrepareLedStrip([#(2, pink), #(7, pink)], Upper, strip_len, 3)
+  let ls4 = ls.PrepareLedStrip([#(3, pink), #(6, pink)], Upper, strip_len, 4)
+  let ls5 = ls.PrepareLedStrip([#(4, green), #(5, green)], Upper, strip_len, 5)
+  [ls0, ls1, ls2, ls3, ls4, ls5]
 }
 
 @external(erlang, "avmgls_ffi", "read_priv")
